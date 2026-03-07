@@ -119,6 +119,7 @@
         "tasks/ItemTransfer.json",
         "tasks/BatchAddFriends.json",
         "tasks/BakerEntry.json",
+        "tasks/GiftOperator.json",
         "tasks/SimpleProductionBatchStart.json",
         "tasks/AutoEcoFarm.json",
         "tasks/AndroidOpenGame.json",
