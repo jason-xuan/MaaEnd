@@ -13,8 +13,8 @@
         }
     },
     "AutoEssenceLocationSetup": {
-        "rate_limit": 1000,
         "max_hit": 1,
+        "rate_limit": 1000,
         "next": [
             "VFTheHubLocationAssertion",
             "VFOriginiumScienceParkLocationAssertion",
