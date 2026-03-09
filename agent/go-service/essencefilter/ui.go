@@ -123,11 +123,53 @@ func escapeHTML(s string) string {
 // calcPlan 描述一个预刻写方案及其对目标武器的覆盖情况。
 type calcPlan struct {
 	slot1Names [3]string
-	fixedSlot  int    // 2 = 附加属性固定, 3 = 技能属性固定
-	fixedID    int    // 固定槽位的技能 ID
-	fixedName  string // 固定槽位的技能中文名
+	fixedSlot  int          // 2 = 附加属性固定, 3 = 技能属性固定
+	fixedID    int          // 固定槽位的技能 ID
+	fixedName  string       // 固定槽位的技能中文名
 	needs      []WeaponData // 未毕业目标武器中能满足的
 	matched    []WeaponData // 全部目标武器中能匹配的（含已毕业）
+}
+
+// spanColor 生成一个带颜色的 <span> 标签。
+func spanColor(color, text string) string {
+	return fmt.Sprintf(`<span style="color:%s;">%s</span>`, color, text)
+}
+
+// planCardHTML 将一个 calcPlan 格式化为带左边框的卡片 HTML 片段。
+func planCardHTML(borderColor string, idx int, p calcPlan, fixedSlotLabel [4]string) string {
+	return fmt.Sprintf(
+		`<div style="margin-top:3px;border-left:3px solid %s;padding-left:6px;">`+
+			`%s `+
+			`基础属性：%s | `+
+			`选择%s：%s<br>`+
+			`满足 <b>%d</b> 个需求 / 匹配 <b>%d</b> 件目标武器<br>`+
+			`满足的需求：%s<br>`+
+			`匹配的武器：%s</div>`,
+		borderColor,
+		spanColor("#98c379", fmt.Sprintf("方案 %d", idx)),
+		spanColor("#47b5ff", escapeHTML(strings.Join(p.slot1Names[:], "，"))),
+		fixedSlotLabel[p.fixedSlot], spanColor("#e877fe", escapeHTML(p.fixedName)),
+		len(p.needs), len(p.matched),
+		weaponListHTML(p.needs),
+		weaponListHTML(p.matched),
+	)
+}
+
+// skillIndex 是 slot1_id → fixedSlot_id → 武器列表 的二级索引，用于快速查找匹配武器。
+type skillIndex map[int]map[int][]WeaponData
+
+// buildSkillIndex 按 allTargets 中指定槽位（1=slot2, 2=slot3）构建索引。
+func buildSkillIndex(allTargets []SkillCombination, slotIdx int) skillIndex {
+	idx := make(skillIndex)
+	for _, combo := range allTargets {
+		s1 := combo.SkillIDs[0]
+		sN := combo.SkillIDs[slotIdx]
+		if idx[s1] == nil {
+			idx[s1] = make(map[int][]WeaponData)
+		}
+		idx[s1][sN] = append(idx[s1][sN], combo.Weapon)
+	}
+	return idx
 }
 
 // logCalculatorResult 在战利品摘要之后，按刷取地点枚举预刻写方案，
@@ -187,44 +229,41 @@ func logCalculatorResult(ctx *maa.Context) {
 	const maxPlansPerLocation = 2
 	fixedSlotLabel := [4]string{"", "", "附加属性", "技能属性"}
 
-	// plansBestNeeds 返回某一 slot2/slot3 子集下的最优方案列表（按需求降序）
+	// 4. 预建索引：slot1_id → slot2/slot3_id → 武器列表，避免枚举时重复全量扫描
+	idx2 := buildSkillIndex(allTargets, 1)
+	idx3 := buildSkillIndex(allTargets, 2)
+
+	// lookupWeapons 通过索引快速查找给定 s1Set + fixedID 匹配的武器。
+	lookupWeapons := func(idx skillIndex, s1Set [3]int, fixedID int) (matched, needs []WeaponData) {
+		for _, s1ID := range s1Set {
+			for _, w := range idx[s1ID][fixedID] {
+				matched = append(matched, w)
+				if !graduated[w.ChineseName] {
+					needs = append(needs, w)
+				}
+			}
+		}
+		return
+	}
+
+	// enumPlans 枚举某一 slot2/slot3 子集下的所有有效方案并按需求数降序排序。
 	enumPlans := func(availSlot2, availSlot3 []SkillPool) []calcPlan {
 		var plans []calcPlan
 		for i := 0; i < n1-2; i++ {
 			for j := i + 1; j < n1-1; j++ {
 				for k := j + 1; k < n1; k++ {
 					s1Names := [3]string{slot1Pool[i].Chinese, slot1Pool[j].Chinese, slot1Pool[k].Chinese}
-					s1Set := map[int]bool{
-						slot1Pool[i].ID: true,
-						slot1Pool[j].ID: true,
-						slot1Pool[k].ID: true,
-					}
+					s1IDs := [3]int{slot1Pool[i].ID, slot1Pool[j].ID, slot1Pool[k].ID}
 					for _, s2 := range availSlot2 {
-						p := calcPlan{slot1Names: s1Names, fixedSlot: 2, fixedName: s2.Chinese, fixedID: s2.ID}
-						for _, combo := range allTargets {
-							if s1Set[combo.SkillIDs[0]] && combo.SkillIDs[1] == s2.ID {
-								p.matched = append(p.matched, combo.Weapon)
-								if !graduated[combo.Weapon.ChineseName] {
-									p.needs = append(p.needs, combo.Weapon)
-								}
-							}
-						}
-						if len(p.needs) > 0 {
-							plans = append(plans, p)
+						matched, needs := lookupWeapons(idx2, s1IDs, s2.ID)
+						if len(needs) > 0 {
+							plans = append(plans, calcPlan{slot1Names: s1Names, fixedSlot: 2, fixedName: s2.Chinese, fixedID: s2.ID, needs: needs, matched: matched})
 						}
 					}
 					for _, s3 := range availSlot3 {
-						p := calcPlan{slot1Names: s1Names, fixedSlot: 3, fixedName: s3.Chinese, fixedID: s3.ID}
-						for _, combo := range allTargets {
-							if s1Set[combo.SkillIDs[0]] && combo.SkillIDs[2] == s3.ID {
-								p.matched = append(p.matched, combo.Weapon)
-								if !graduated[combo.Weapon.ChineseName] {
-									p.needs = append(p.needs, combo.Weapon)
-								}
-							}
-						}
-						if len(p.needs) > 0 {
-							plans = append(plans, p)
+						matched, needs := lookupWeapons(idx3, s1IDs, s3.ID)
+						if len(needs) > 0 {
+							plans = append(plans, calcPlan{slot1Names: s1Names, fixedSlot: 3, fixedName: s3.Chinese, fixedID: s3.ID, needs: needs, matched: matched})
 						}
 					}
 				}
@@ -244,6 +283,14 @@ func logCalculatorResult(ctx *maa.Context) {
 		`<div style="color:#00bfff;font-weight:900;margin-top:8px;">预刻写方案推荐（%d 个未毕业需求）：</div>`,
 		len(ungraduated),
 	))
+	b.WriteString(weaponListHTML(func() []WeaponData {
+		ws := make([]WeaponData, 0, len(ungraduated))
+		for _, combo := range ungraduated {
+			ws = append(ws, combo.Weapon)
+		}
+		return ws
+	}()))
+	b.WriteString(`<br>`)
 
 	if len(weaponDB.Locations) > 0 {
 		// 按地点分组输出
@@ -274,7 +321,7 @@ func logCalculatorResult(ctx *maa.Context) {
 			}
 
 			b.WriteString(fmt.Sprintf(
-				`<div style="color:#ffcc00;font-weight:900;margin-top:6px;">%s</div>`,
+				`<div style="color:#c8960c;font-weight:900;margin-top:6px;">%s</div>`,
 				escapeHTML(loc.Name),
 			))
 			show := maxPlansPerLocation
@@ -282,21 +329,7 @@ func logCalculatorResult(ctx *maa.Context) {
 				show = len(plans)
 			}
 			for idx, p := range plans[:show] {
-				b.WriteString(fmt.Sprintf(
-					`<div style="margin-top:3px;border-left:3px solid #ffcc00;padding-left:6px;">`+
-						`<span style="color:#aaffaa;">方案 %d</span> `+
-						`基础属性：<span style="color:#47b5ff;">%s</span> | `+
-						`选择%s：<span style="color:#e877fe;">%s</span><br>`+
-						`满足 <b>%d</b> 个需求 / 匹配 <b>%d</b> 件目标武器<br>`+
-						`满足的需求：%s<br>`+
-						`匹配的武器：%s</div>`,
-					idx+1,
-					strings.Join(p.slot1Names[:], "，"),
-					fixedSlotLabel[p.fixedSlot], escapeHTML(p.fixedName),
-					len(p.needs), len(p.matched),
-					weaponListHTML(p.needs),
-					weaponListHTML(p.matched),
-				))
+				b.WriteString(planCardHTML("#c8960c", idx+1, p, fixedSlotLabel))
 			}
 		}
 	} else {
@@ -307,21 +340,7 @@ func logCalculatorResult(ctx *maa.Context) {
 			show = len(plans)
 		}
 		for idx, p := range plans[:show] {
-			b.WriteString(fmt.Sprintf(
-				`<div style="margin-top:5px;border-left:3px solid #00bfff;padding-left:6px;">`+
-					`<span style="color:#ffcc00;font-weight:700;">方案 %d</span><br>`+
-					`选择基础属性：<span style="color:#47b5ff;">%s</span><br>`+
-					`选择%s：<span style="color:#e877fe;">%s</span><br>`+
-					`满足 <b>%d</b> 个需求，匹配 <b>%d</b> 件目标武器<br>`+
-					`满足的需求：%s<br>`+
-					`匹配的武器：%s</div>`,
-				idx+1,
-				strings.Join(p.slot1Names[:], "，"),
-				fixedSlotLabel[p.fixedSlot], escapeHTML(p.fixedName),
-				len(p.needs), len(p.matched),
-				weaponListHTML(p.needs),
-				weaponListHTML(p.matched),
-			))
+			b.WriteString(planCardHTML("#00bfff", idx+1, p, fixedSlotLabel))
 		}
 	}
 	LogMXUHTML(ctx, b.String())
